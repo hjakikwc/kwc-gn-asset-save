@@ -1,0 +1,30 @@
+schema_version = "1.0.0"
+
+id = "kwc_gn_asset_save"
+version = "1.0.0"
+name = "KWC GN Asset Save"
+tagline = "Save selected Geometry Nodes into an Asset Library as a clean .blend"
+maintainer = "hjaki"
+type = "add-on"
+
+website = "https://kwc.booth.pm/"
+
+tags = ["Geometry Nodes", "Pipeline"]
+
+blender_version_min = "4.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+copyright = [
+  "2026 Hayano",
+]
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/*.zip",
+  "/.gitignore",
+]
