@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "kwc_gn_asset_save"
-version = "1.0.0"
+version = "1.1.0"
 name = "KWC GN Asset Save"
 tagline = "Save selected Geometry Nodes into an Asset Library as a clean .blend"
 maintainer = "hjaki"

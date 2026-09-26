@@ -31,6 +31,7 @@ from bpy.props import (
     StringProperty,
 )
 from bpy.types import AddonPreferences, Operator, Panel
+from bpy_extras.io_utils import ImportHelper
 
 
 _MANIFEST_PATH = Path(__file__).with_name("blender_manifest.toml")
@@ -134,6 +135,59 @@ def _collect_nested_groups(root: bpy.types.NodeTree) -> set[bpy.types.NodeTree]:
     return found
 
 
+def _write_geometry_nodes_asset(
+    tree: bpy.types.NodeTree,
+    filepath: str,
+    *,
+    mark_nested_groups: bool,
+    keep_marks_in_current_file: bool,
+    compress: bool,
+    replace_existing: bool,
+) -> tuple[bool, str]:
+    """Write tree to filepath. Returns (ok, message)."""
+    if os.path.exists(filepath):
+        if not replace_existing:
+            return False, f"File already exists: {filepath}"
+        try:
+            os.remove(filepath)
+        except OSError as exc:
+            return False, f"Cannot overwrite existing file: {exc}"
+    else:
+        if replace_existing:
+            return False, f"File not found (pick an existing .blend): {filepath}"
+        dest_dir = os.path.dirname(filepath)
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError as exc:
+            return False, f"Cannot create folder: {exc}"
+
+    nested = _collect_nested_groups(tree)
+    to_mark = set(nested) if mark_nested_groups else {tree}
+    previously_assets = {nt for nt in to_mark if nt.asset_data is not None}
+
+    for nt in to_mark:
+        if nt.asset_data is None:
+            nt.asset_mark()
+
+    try:
+        bpy.data.libraries.write(
+            filepath,
+            {tree},
+            fake_user=True,
+            compress=compress,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface Blender write errors
+        return False, f"Write failed: {exc}"
+    finally:
+        if not keep_marks_in_current_file:
+            for nt in to_mark:
+                if nt not in previously_assets and nt.asset_data is not None:
+                    nt.asset_clear()
+
+    nested_count = max(0, len(nested) - 1)
+    return True, f"Saved '{tree.name}' (+{nested_count} nested) → {filepath}"
+
+
 # ---------------------------------------------------------------------------
 # Preferences
 # ---------------------------------------------------------------------------
@@ -183,16 +237,18 @@ def _prefs(context) -> KWC_GNAS_AddonPreferences:
 
 
 # ---------------------------------------------------------------------------
-# Operator
+# Operators
 # ---------------------------------------------------------------------------
 
 
-class KWC_GNAS_OT_save_to_library(Operator):
-    bl_idname = "kwc_gn_asset_save.save_to_library"
-    bl_label = "Save Geometry Nodes to Asset Library"
+class KWC_GNAS_OT_save_new(Operator):
+    """Create a new .blend in an Asset Library (fails if the file already exists)."""
+
+    bl_idname = "kwc_gn_asset_save.save_new"
+    bl_label = "Save New to Asset Library"
     bl_description = (
-        "Write only the selected Geometry Nodes tree (plus its dependencies) "
-        "into a .blend under an Asset Library folder, marked as an asset"
+        "Write only the selected Geometry Nodes tree into a new .blend "
+        "under an Asset Library folder. Does not overwrite existing files"
     )
     bl_options = {"REGISTER"}
 
@@ -229,11 +285,6 @@ class KWC_GNAS_OT_save_to_library(Operator):
         name="Compress .blend",
         default=True,
     )
-    overwrite: BoolProperty(
-        name="Overwrite Existing",
-        description="Replace the destination file if it already exists",
-        default=False,
-    )
 
     def invoke(self, context, event):
         prefs = _prefs(context)
@@ -265,7 +316,6 @@ class KWC_GNAS_OT_save_to_library(Operator):
         col.prop(self, "mark_nested_groups")
         col.prop(self, "keep_marks_in_current_file")
         col.prop(self, "compress")
-        col.prop(self, "overwrite")
 
         lib = _resolve_library(context, self.library_index)
         box = layout.box()
@@ -275,6 +325,8 @@ class KWC_GNAS_OT_save_to_library(Operator):
             dest = self._destination_path(lib)
             box.label(text="Destination:", icon="ASSET_MANAGER")
             box.label(text=dest)
+            if os.path.exists(dest):
+                box.label(text="Already exists — use Overwrite instead", icon="ERROR")
 
     def _destination_path(self, lib) -> str:
         name = _safe_filename(self.filename or self.node_tree_name or "GeometryNodes")
@@ -299,51 +351,123 @@ class KWC_GNAS_OT_save_to_library(Operator):
             return {"CANCELLED"}
 
         filepath = self._destination_path(lib)
-        if os.path.exists(filepath) and not self.overwrite:
-            self.report(
-                {"ERROR"},
-                f"File already exists (enable Overwrite): {filepath}",
-            )
-            return {"CANCELLED"}
-
-        dest_dir = os.path.dirname(filepath)
-        try:
-            os.makedirs(dest_dir, exist_ok=True)
-        except OSError as exc:
-            self.report({"ERROR"}, f"Cannot create folder: {exc}")
-            return {"CANCELLED"}
-
-        nested = _collect_nested_groups(tree)
-        to_mark = set(nested) if self.mark_nested_groups else {tree}
-        previously_assets = {nt for nt in to_mark if nt.asset_data is not None}
-
-        for nt in to_mark:
-            if nt.asset_data is None:
-                nt.asset_mark()
-
-        try:
-            # libraries.write expands nested groups / linked deps automatically.
-            bpy.data.libraries.write(
-                filepath,
-                {tree},
-                fake_user=True,
-                compress=self.compress,
-            )
-        except Exception as exc:  # noqa: BLE001 - surface Blender write errors
-            self.report({"ERROR"}, f"Write failed: {exc}")
-            return {"CANCELLED"}
-        finally:
-            if not self.keep_marks_in_current_file:
-                for nt in to_mark:
-                    if nt not in previously_assets and nt.asset_data is not None:
-                        nt.asset_clear()
-
-        nested_count = max(0, len(nested) - 1)
-        self.report(
-            {"INFO"},
-            f"Saved '{tree.name}' (+{nested_count} nested) → {filepath}",
+        ok, message = _write_geometry_nodes_asset(
+            tree,
+            filepath,
+            mark_nested_groups=self.mark_nested_groups,
+            keep_marks_in_current_file=self.keep_marks_in_current_file,
+            compress=self.compress,
+            replace_existing=False,
         )
-        return {"FINISHED"}
+        self.report({"INFO"} if ok else {"ERROR"}, message)
+        return {"FINISHED"} if ok else {"CANCELLED"}
+
+
+class KWC_GNAS_OT_overwrite(Operator, ImportHelper):
+    """Overwrite an existing .blend by picking it in the file browser."""
+
+    bl_idname = "kwc_gn_asset_save.overwrite"
+    bl_label = "Overwrite Asset File"
+    bl_description = (
+        "Pick an existing .blend and replace it with the selected Geometry Nodes tree only"
+    )
+    bl_options = {"REGISTER"}
+
+    filename_ext = ".blend"
+    filter_glob: StringProperty(default="*.blend", options={"HIDDEN"})
+
+    filepath: StringProperty(
+        name="File Path",
+        description="Existing .blend file to overwrite",
+        subtype="FILE_PATH",
+    )
+    node_tree_name: EnumProperty(
+        name="Geometry Nodes",
+        description="Geometry Nodes tree to export",
+        items=_node_tree_items,
+    )
+    mark_nested_groups: BoolProperty(
+        name="Mark Nested Groups as Assets",
+        default=False,
+    )
+    keep_marks_in_current_file: BoolProperty(
+        name="Keep Asset Marks in Current File",
+        default=True,
+    )
+    compress: BoolProperty(
+        name="Compress .blend",
+        default=True,
+    )
+
+    def invoke(self, context, event):
+        prefs = _prefs(context)
+        self.mark_nested_groups = prefs.mark_nested_groups
+        self.keep_marks_in_current_file = prefs.keep_marks_in_current_file
+        self.compress = prefs.compress
+
+        default_name = _default_tree_name(context)
+        if default_name:
+            self.node_tree_name = default_name
+
+        lib = _resolve_library(context, prefs.default_library)
+        if lib is not None and lib.path:
+            start = lib.path
+            sub = (prefs.default_subfolder or "").strip().strip("/\\")
+            if sub:
+                start = os.path.join(start, sub)
+            if os.path.isdir(start):
+                self.filepath = os.path.join(start, "")
+            else:
+                self.filepath = os.path.join(lib.path, "")
+
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "node_tree_name")
+        layout.prop(self, "mark_nested_groups")
+        layout.prop(self, "keep_marks_in_current_file")
+        layout.prop(self, "compress")
+        layout.label(text="Select an existing .blend to replace", icon="INFO")
+
+    def execute(self, context):
+        filepath = bpy.path.abspath(self.filepath)
+        if not filepath.lower().endswith(".blend"):
+            self.report({"ERROR"}, "Please select a .blend file")
+            return {"CANCELLED"}
+        if not os.path.isfile(filepath):
+            self.report({"ERROR"}, f"File not found: {filepath}")
+            return {"CANCELLED"}
+
+        tree = bpy.data.node_groups.get(self.node_tree_name)
+        if tree is None or not _is_geometry_node_tree(tree):
+            self.report({"ERROR"}, "Geometry Nodes tree not found")
+            return {"CANCELLED"}
+
+        ok, message = _write_geometry_nodes_asset(
+            tree,
+            filepath,
+            mark_nested_groups=self.mark_nested_groups,
+            keep_marks_in_current_file=self.keep_marks_in_current_file,
+            compress=self.compress,
+            replace_existing=True,
+        )
+        self.report({"INFO"} if ok else {"ERROR"}, message)
+        return {"FINISHED"} if ok else {"CANCELLED"}
+
+
+# Keep old id as alias so existing keymaps / scripts still open New.
+class KWC_GNAS_OT_save_to_library(Operator):
+    bl_idname = "kwc_gn_asset_save.save_to_library"
+    bl_label = "Save New to Asset Library"
+    bl_description = "Alias for Save New to Asset Library"
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    def execute(self, context):
+        return bpy.ops.kwc_gn_asset_save.save_new("INVOKE_DEFAULT")
 
 
 # ---------------------------------------------------------------------------
@@ -373,10 +497,16 @@ class KWC_GNAS_PT_panel(Panel):
         else:
             col.label(text="No active Geometry Nodes tree", icon="INFO")
 
-        layout.operator(
-            KWC_GNAS_OT_save_to_library.bl_idname,
-            icon="ASSET_MANAGER",
-            text="Save to Asset Library…",
+        col = layout.column(align=True)
+        col.operator(
+            KWC_GNAS_OT_save_new.bl_idname,
+            icon="ADD",
+            text="Save New…",
+        )
+        col.operator(
+            KWC_GNAS_OT_overwrite.bl_idname,
+            icon="FILE_TICK",
+            text="Overwrite…",
         )
 
 
@@ -387,6 +517,8 @@ class KWC_GNAS_PT_panel(Panel):
 
 classes = (
     KWC_GNAS_AddonPreferences,
+    KWC_GNAS_OT_save_new,
+    KWC_GNAS_OT_overwrite,
     KWC_GNAS_OT_save_to_library,
     KWC_GNAS_PT_panel,
 )

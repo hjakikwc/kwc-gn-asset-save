@@ -24,11 +24,10 @@ https://hjakikwc.github.io/kwc-gn-asset-save/index.json
 
 1. Open **Geometry Node Editor**
 2. **N** panel > **KWC** > **GN Asset Save**
-3. **Save to Asset Library…**
-4. Pick Geometry Nodes tree + Asset Library (+ optional subfolder / file name)
-5. Confirm — a `.blend` with only that tree (and its deps) is written under the library path
+3. **Save New…** — create a new `.blend` under an Asset Library (errors if the file already exists)
+4. **Overwrite…** — pick an existing `.blend` in the file browser and replace it with the selected Geometry Nodes tree
 
-Default destination preference: Preferences > Add-ons > KWC GN Asset Save.
+Default Asset Library / options: Preferences > Add-ons > KWC GN Asset Save.
 
 ## Release
 
